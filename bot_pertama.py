@@ -1,70 +1,63 @@
+import os
 import yfinance as yf
 import pandas as pd
 import requests
 import schedule
 import time
 from datetime import datetime
-
-# Import mesin terbaru dari Google
 from google import genai 
 
-# ==========================================
-# 1. KONFIGURASI KREDENSIAL
-# ==========================================
-TOKEN_TELEGRAM = "8920022906:AAFVrbJMK31KV7a3dorTbMMia6ZUr1JJY20" 
-CHAT_ID = "5802563077"
-API_KEY_GEMINI = "" 
+# --- TAMBAHAN UNTUK CLOUD (Server Web Palsu) ---
+from flask import Flask
+from threading import Thread
 
-# Konfigurasi Otak Gemini (Sintaks Terbaru 2024/2025)
-client = genai.Client(api_key=API_KEY_GEMINI)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Agen Trading AI sedang bekerja 24/7 di awan!"
+
+# ==========================================
+# 1. KONFIGURASI KREDENSIAL (AMAN DI CLOUD)
+# ==========================================
+TOKEN_TELEGRAM = os.environ.get("TOKEN_TELEGRAM")
+CHAT_ID = os.environ.get("CHAT_ID")
+API_KEY_GEMINI = os.environ.get("API_KEY_GEMINI")
+
+if API_KEY_GEMINI:
+    client = genai.Client(api_key=API_KEY_GEMINI)
+else:
+    print("⚠️ PERINGATAN: API_KEY_GEMINI tidak ditemukan!")
 
 def kirim_telegram(pesan):
+    if not TOKEN_TELEGRAM or not CHAT_ID:
+        return
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": pesan}
-    requests.post(url, json=payload)
+    try:
+        requests.post(url, json={"chat_id": CHAT_ID, "text": pesan})
+    except:
+        pass
 
 def analisis_sentimen_berita(ticker_symbol):
-    """Agen Gemini bertugas membaca berita dan menyimpulkan sentimen"""
-    print("🧠 Gemini sedang membaca berita global terbaru...")
+    if not API_KEY_GEMINI: return "NETRAL ⚪"
     try:
-        # Menarik berita keuangan terbaru
         ticker = yf.Ticker(ticker_symbol)
         berita = ticker.news
-        
-        if not berita:
-            return "NETRAL ⚪ (Tidak ada berita tersedia)"
+        if not berita: return "NETRAL ⚪"
 
         kumpulan_judul = ""
         for b in berita[:5]:
-            # PENGAMANAN BARU: Mencari judul di berbagai struktur data Yahoo Finance
             judul = b.get('title') or (b.get('content') and b['content'].get('title')) or ""
-            if judul:
-                kumpulan_judul += f"- {judul}\n"
+            if judul: kumpulan_judul += f"- {judul}\n"
         
-        if not kumpulan_judul.strip():
-            return "NETRAL ⚪ (Gagal mengekstrak teks berita)"
-            
-        # Prompt ketat untuk Gemini
-        prompt = f"""Kamu adalah analis Hedge Fund senior. Baca judul berita Bitcoin terbaru ini:
-        {kumpulan_judul}
-        
-        Tugas: Apakah sentimen pasar secara keseluruhan POSITIF, NEGATIF, atau NETRAL? 
-        Jawab HANYA dengan 1 kata tersebut. Tidak boleh ada tambahan kata lain."""
-        
-        # EKSEKUSI MENGGUNAKAN MODEL TERBARU (DIUBAH KE GEMINI-2.5-FLASH)
-        respon = client.models.generate_content(
-            model='gemini-2.5-flash',  # <-- Ubah bagian ini
-            contents=prompt
-        )
-        
+        prompt = f"Baca judul berita Bitcoin ini:\n{kumpulan_judul}\nApakah sentimen pasar POSITIF, NEGATIF, atau NETRAL? Jawab HANYA dengan 1 kata tersebut."
+        respon = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         sentimen = respon.text.strip().upper()
         
         if "POSITIF" in sentimen: return "POSITIF 🟢"
         elif "NEGATIF" in sentimen: return "NEGATIF 🔴"
         else: return "NETRAL ⚪"
-        
-    except Exception as e:
-        print(f"⚠️ Gagal menghubungi Gemini: {e}")
+    except:
         return "NETRAL ⚪"
 
 # ==========================================
@@ -72,77 +65,69 @@ def analisis_sentimen_berita(ticker_symbol):
 # ==========================================
 def cek_pasar():
     waktu_sekarang = datetime.now().strftime("%H:%M:%S")
-    print(f"\n[{waktu_sekarang}] 🤖 Menarik data real-time BTC-USD...")
+    print(f"[{waktu_sekarang}] 🤖 Menarik data BTC-USD...")
     
-    # PERUBAHAN: period diperpendek agar lebih ringan di server cloud
-    df = yf.download('BTC-USD', period='1mo', interval='1d', progress=False)
-    
-    # PENGAMANAN BARU: Jika download gagal, jangan lanjut ke perhitungan
-    if df.empty:
-        print("⚠️ Gagal menarik data dari Yahoo Finance. Mencoba lagi nanti...")
-        return 
+    try:
+        df = yf.download('BTC-USD', period='1mo', interval='1d', progress=False)
+        if df.empty: return 
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    # (Sisa perhitungan indikator di bawah tetap sama...)
-    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    macd = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD_Hist'] = macd - macd.ewm(span=9, adjust=False).mean()
-    
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-
-    # Syarat Matematika
-    df['Sinyal'] = 0
-    kondisi_beli = (df['EMA_20'] > df['EMA_50']) & (df['MACD_Hist'] > 0) & (df['RSI'] < 70)
-    kondisi_jual = (df['EMA_20'] <= df['EMA_50']) | (df['RSI'] > 75)
-
-    df.loc[kondisi_beli, 'Sinyal'] = 1
-    df.loc[kondisi_jual, 'Sinyal'] = -1
-    status_terakhir = df['Sinyal'].diff().iloc[-1]
-    harga_terakhir = float(df['Close'].iloc[-1])
-
-    # --- PENGAMBILAN KEPUTUSAN GANDA (MATH + SENTIMENT) ---
-    tp_harga = harga_terakhir * 1.06
-    cl_harga = harga_terakhir * 0.98
-
-    if status_terakhir == 2: # MATEMATIKA MENYURUH BELI
-        sentimen_gemini = analisis_sentimen_berita('BTC-USD')
+        df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        macd = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD_Hist'] = macd - macd.ewm(span=9, adjust=False).mean()
         
-        if "NEGATIF" in sentimen_gemini:
-            pesan = (f"🛡️ [PEMBELIAN DIBATALKAN] BTC-USD\n\n"
-                     f"Matematika menyuruh Beli, TAPI Gemini Pro mendeteksi berita NEGATIF 🔴.\n"
-                     f"Agen membatalkan eksekusi demi melindungi modal Anda!")
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+        df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+
+        df['Sinyal'] = 0
+        kondisi_beli = (df['EMA_20'] > df['EMA_50']) & (df['MACD_Hist'] > 0) & (df['RSI'] < 70)
+        kondisi_jual = (df['EMA_20'] <= df['EMA_50']) | (df['RSI'] > 75)
+        df.loc[kondisi_beli, 'Sinyal'] = 1
+        df.loc[kondisi_jual, 'Sinyal'] = -1
+        
+        if len(df) < 2: return
+
+        status_terakhir = df['Sinyal'].diff().iloc[-1]
+        harga_terakhir = float(df['Close'].iloc[-1])
+        tp_harga = harga_terakhir * 1.06
+        cl_harga = harga_terakhir * 0.98
+
+        if status_terakhir == 2:
+            sent = analisis_sentimen_berita('BTC-USD')
+            if "NEGATIF" in sent:
+                pesan = f"🛡️ [PEMBELIAN DIBATALKAN] BTC-USD\n\nGemini mendeteksi berita NEGATIF 🔴. Eksekusi dibatalkan!"
+            else:
+                pesan = f"🚀 [SINYAL BELI TERKONFIRMASI] BTC-USD\n\nHarga Virtual: ${harga_terakhir:,.2f}\nSentimen: {sent}\n🎯 TP: ${tp_harga:,.2f} | 🛡️ CL: ${cl_harga:,.2f}"
+        elif status_terakhir == -2:
+            pesan = f"⚠️ [SINYAL JUAL DARURAT] BTC-USD\n\nHarga Jual Virtual: ${harga_terakhir:,.2f}\nPosisi ditutup!"
         else:
-            pesan = (f"🚀 [SINYAL BELI TERKONFIRMASI] BTC-USD\n\n"
-                     f"Harga Beli Virtual: ${harga_terakhir:,.2f}\n"
-                     f"Sentimen Berita: {sentimen_gemini}\n"
-                     f"🎯 TP 6%: ${tp_harga:,.2f} | 🛡️ CL 2%: ${cl_harga:,.2f}")
-             
-    elif status_terakhir == -2: # MATEMATIKA MENYURUH JUAL
-        pesan = (f"⚠️ [SINYAL JUAL DARURAT] BTC-USD\n\n"
-                 f"Harga Jual Virtual: ${harga_terakhir:,.2f}\n"
-                 f"Aksi: Posisi ditutup! Kembali ke Cash.")
-    else:
-        sentimen_gemini = analisis_sentimen_berita('BTC-USD')
-        pesan = (f"⏳ [LAPORAN REAL-TIME AI-PRO] BTC-USD\n\n"
-                 f"Harga Live: ${harga_terakhir:,.2f}\n"
-                 f"Status Sinyal: HOLD 💤\n"
-                 f"Analisis Sentimen Berita: {sentimen_gemini}\n"
-                 f"Sistem Simulasi Rp 2 Juta Aman.")
+            sent = analisis_sentimen_berita('BTC-USD')
+            pesan = f"⏳ [LAPORAN REAL-TIME AI-PRO] BTC-USD\n\nHarga Live: ${harga_terakhir:,.2f}\nStatus Sinyal: HOLD 💤\nSentimen: {sent}"
 
-    kirim_telegram(pesan)
-    print(f"=> Laporan berhasil dikirim ke Telegram! (Sentimen: {sentimen_gemini})")
+        kirim_telegram(pesan)
+    except Exception as e:
+        print(f"Error: {e}")
 
-print("⚙️ MODE OTOMATIS GANDA AKTIF (Holy Trinity + Gemini Pro Sentimen).")
-schedule.every(1).minutes.do(cek_pasar)
+# ==========================================
+# 3. MESIN PENGGERAK UTAMA
+# ==========================================
+def jalankan_bot():
+    cek_pasar()
+    schedule.every(1).minutes.do(cek_pasar)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
 
-cek_pasar()
-
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+if __name__ == "__main__":
+    print("⚙️ MODE OTOMATIS AKTIF: Memulai Bot & Web Server...")
+    
+    # Menjalankan bot di latar belakang
+    t = Thread(target=jalankan_bot)
+    t.start()
+    
+    # Menjalankan web server palsu agar Render tidak mematikan mesinnya
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
